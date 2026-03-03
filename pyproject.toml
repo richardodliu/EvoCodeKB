@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "evokb"
+version = "0.1.0"
+description = "Code knowledge base with AST fingerprint retrieval"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "pygments>=2.15",
+    "tree-sitter-language-pack>=0.10",
+]
+
+[project.scripts]
+evokb = "evokb.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["evokb*"]
+
+[tool.setuptools.package-data]
+evokb = ["config.json"]
