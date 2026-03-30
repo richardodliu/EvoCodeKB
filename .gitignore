@@ -39,3 +39,10 @@ data/*
 
 # Jupyter Notebook
 *.ipynb
+
+# Large benchmark outputs (use .jsonl.xz instead)
+benchmark/output_*.jsonl
+benchmark/runs/**/output_*.jsonl
+benchmark/runs/**/per_sample.rank*.jsonl
+benchmark/runs/**/summary.rank*.json
+benchmark/runs/**/run*.log
