@@ -6,7 +6,7 @@ from typing import List, Optional
 class TextFingerprintGenerator:
     """文本 N-gram 指纹生成器。"""
 
-    def __init__(self, n: int = 3):
+    def __init__(self, n: int = 2):
         if n < 2:
             raise ValueError(f"n must be >= 2, got {n}")
         self.n = n
