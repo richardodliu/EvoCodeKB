@@ -1,187 +1,134 @@
-# EvoCodeKB - 可演进的代码知识库
+# EvoCodeKB
 
-一个基于 SQLite 的代码知识库系统，支持代码和注释的分离存储与检索。
+一个基于 SQLite 的可演进代码知识库，当前按“语义单元”存储源码，不再按整文件入库。
 
-## 特性
+## 当前模型
 
-- 使用 Pygments 进行精确的词法分析，正确提取代码和注释
-- 支持从 zip 压缩包批量导入多个仓库
-- 支持多仓库管理，记录仓库名和相对路径
-- 基于 SQLite 的轻量级存储
-- 灵活的检索接口（按语言、仓库、类型过滤）
-- 命令行工具支持
+- 存储粒度：`function`、`method`、`type`、`global`、`declaration_block`
+- `declaration_block` 仅用于 `function` / `method` 体内的连续局部声明块
+- 每条记录保留原始源码切片 `text`
+- 每条记录带 `start_line` / `end_line`
+- 不再区分 `code` 和 `comment`，两种指纹均基于完整 `text`（含前导注释）生成
+- 同一个 `text` 同时支持两种检索：
+  - `knowledge_retrieve`：基于 AST 结构指纹（tree-sitter 遍历 `text`）
+  - `information_retrieve`：基于全文本 N-gram 指纹（对 `text` 提取词级 N-gram）
+- AST 结构指纹遍历全部子节点（含运算符等 unnamed token），保留运算符区分度
+- 指纹使用集合语义（`frozenset`），Jaccard/覆盖度基于集合交并集计算
+- 候选量大时先按 Jaccard 相似度 prefilter 取 top-k，再做贪心覆盖选择
+- 贪心覆盖度耗尽后按 Jaccard 相似度降序补齐至 `shots` 数（前者保证多样性，后者保证返回数量）
+- 同分候选按 tiebreaker 排序：`KIND_PRIORITY`（细粒度优先）→ 行数更短优先 → 限定名字典序 → id 更小优先
+- 检索结果同时返回 `score`（当轮覆盖率，上下文相关）和 `similarity`（全局 Jaccard，上下文无关）
+
+父子条目允许同时存在。例如类/结构体会保留完整定义（`type`），类内方法也会单独存储（`method`），服务不同粒度的检索需求。存储膨胀约 2x，但贪心算法天然按指纹集大小调节排名。
+
+## 支持语言
+
+- **C**（统一处理 C 和 C++，所有 `.c`/`.cpp`/`.hpp`/`.cc`/`.cxx`/`.hh`/`.h` 文件均记录为语言 `"C"`，使用 tree-sitter C++ 解析器）
+- **Java**
+
+> **设计说明**: C 和 C++ 统一为单一语言标识 `"C"`。C++ 解析器是 C 的超集，能正确解析纯 C 代码，同时保证 C/C++ 代码在同一 AST 体系下生成结构指纹，检索时无需跨语言查询。
+
+> **已知局限**: tree-sitter 不做宏展开，未知的宏标识符（如 `TEST_END`、`JEMALLOC_ALWAYS_INLINE`）可能被解析为类型名，导致约 1.9% 的记录 text 多出一行不相关的宏前缀。对指纹和检索排名影响极小。
+
+## 安装
+
+```bash
+pip install -e .
+```
+
+依赖：
+
+- `pygments`
+- `tree-sitter-language-pack`
 
 ## 数据组织
 
-```
+```text
 data/
-├── test/              # 数据集名称
-│   ├── redis.zip     # 代码仓库压缩包
-│   ├── repo2.zip
-│   └── repo3.zip
-└── train/            # 另一个数据集
+├── test/
+│   ├── redis.zip
+│   └── repo2.zip
+└── train/
     ├── repoA.zip
     └── repoB.zip
 ```
 
-每个 zip 文件代表一个代码仓库，zip 文件名（去掉 .zip）作为仓库名。
+每个 `zip` 文件代表一个仓库，文件名去掉 `.zip` 后作为仓库名。
 
-## 安装依赖
-
-```bash
-pip install pygments
-```
-
-## 快速开始
+## 命令行
 
 ### 1. 构建知识库
 
-从数据集目录构建知识库（自动处理所有 zip 文件）：
+```bash
+python main.py update --knowledge_path data/test --knowledge_base test
+```
+
+导入时会读取配置里支持的全部扩展名，并把每个源码文件切分成语义条目后入库。
+
+### 2. 查看统计
 
 ```bash
-python main.py --construct_knowledgebase data/test --knowledgebase_name test
+python main.py stats --knowledge_base test
 ```
 
-输出示例：
-```
-找到 1 个仓库压缩包
+输出包含：
 
-处理仓库: redis
-  找到 720 个文件
-  ✓ redis 导入完成 (成功: 720, 失败: 0)
+- 总条目数
+- 按语言统计
+- 按仓库统计
+- 按语义类型统计
 
-==================================================
-全部导入完成！
-总文件数: 720
-成功: 720
-失败: 0
-==================================================
-
-数据库统计:
-  总记录数: 720
-  按语言: {'C': 720}
-  按仓库: {'redis': 720}
-```
-
-### 2. 查看统计信息
+### 3. 搜索语义条目
 
 ```bash
-python main.py --stats test
+python main.py search "malloc" --knowledge_base test --shots 5
+python main.py search "linked list" --knowledge_base test --kind type
+python main.py search "printf" --knowledge_base test --repo redis --kind function
 ```
 
-输出示例：
-```
-总文件数: 720
+搜索只针对 `text` 字段，不再区分 `code/comment/text`。
 
-按语言:
-  C: 720
-
-按仓库:
-  redis: 720
-```
-
-### 3. 搜索代码
+### 4. 结构检索
 
 ```bash
-# 在代码中搜索
-python main.py --search "malloc" --knowledgebase_name test --type code --limit 5
-
-# 在注释中搜索
-python main.py --search "Redis" --knowledgebase_name test --type comment --limit 10
-
-# 全文搜索
-python main.py --search "list" --knowledgebase_name test --lang C
-
-# 按仓库过滤
-python main.py --search "malloc" --knowledgebase_name test --repo redis
+python main.py knowledge_retrieve input.c --knowledge_base test --shots 5 --lang C
 ```
 
-### 4. 重置数据库
+用于检索和输入代码结构最相似的语义条目。
+
+### 5. 信息检索
 
 ```bash
-python main.py --reset test
+python main.py information_retrieve input.txt --knowledge_base test --shots 5
 ```
 
-## 命令行参数
+用于检索和输入自然语言/文本描述最相关的语义条目。
 
-### 构建知识库
-```bash
-python main.py --construct_knowledgebase <dataset_dir> --knowledgebase_name <kb_name>
-```
-从数据集目录构建知识库，自动处理目录下所有 .zip 文件。
-
-参数：
-- `--construct_knowledgebase` - 数据集目录路径（如 data/test）
-- `--knowledgebase_name` - 知识库名称（如 test），保存到 knowledgebase/test.db
-
-### 查看统计
-```bash
-python main.py --stats <kb_name>
-```
-显示数据库统计信息（总文件数、按语言、按仓库）。
-
-### 搜索
-```bash
-python main.py --search <query> --knowledgebase_name <kb_name> [options]
-```
-
-选项：
-- `--type all|code|comment|text` - 搜索范围（默认 all）
-- `--lang C` - 按语言过滤
-- `--repo <repo_name>` - 按仓库过滤
-- `--limit N` - 最多显示 N 条结果（默认 10）
-
-### 重置数据库
-```bash
-python main.py --reset <kb_name>
-```
-删除并重新初始化数据库。
-
-## 编程接口
+## Python 接口
 
 ```python
-from src.code_kb import CodeKnowledgeBase
+from evokb.knowledgebase import KnowledgeBase
 
-# 创建知识库实例
-kb = CodeKnowledgeBase('knowledgebase/test.db')
+kb = KnowledgeBase("knowledgebase/test.db")
 
-# 从内存中的内容处理文件
-result = kb.process_file_from_content(
+records = kb.process_file_from_content(
     content=file_content,
-    file_path='src/adlist.c',
-    repository='redis',
-    relative_path='src/adlist.c'
+    file_path="src/adlist.c",
+    repository="redis",
+    relative_path="src/adlist.c",
 )
 
-# 保存到数据库
-kb.update_database_from_dict(result)
+kb.update_database_from_records(records)
 
-# 搜索
 results = kb.search_database(
-    query='malloc',
-    search_type='code',
-    language='C',
-    repository='redis'
+    query="malloc",
+    language="C",
+    repository="redis",
+    kind="function",
 )
 
-# 获取统计信息
-stats = kb.get_stats()
-print(stats)
-```
-
-## 配置
-
-编辑 `config.json` 添加新的语言支持：
-
-```json
-{
-    "languages": [
-        {
-            "name": "C",
-            "extensions": [".c", ".h"]
-        }
-    ]
-}
+similar = kb.knowledge_retrieve(input_code, "C", shots=5)
+related = kb.information_retrieve("allocate memory for buffer", shots=5)
 ```
 
 ## 数据库结构
@@ -193,50 +140,33 @@ print(stats)
 | id | INTEGER | 主键 |
 | repository | TEXT | 仓库名 |
 | relative_path | TEXT | 文件相对路径 |
-| text | TEXT | 完整文本 |
-| code | TEXT | 去除注释的代码 |
-| comment | TEXT | 提取的注释 |
 | file_extension | TEXT | 文件后缀 |
-| language | TEXT | 语言类型 |
+| language | TEXT | 语言 |
+| kind | TEXT | `declaration_block/global/function/method/type` |
+| node_type | TEXT | tree-sitter 原始节点类型 |
+| symbol_name | TEXT | 当前条目名 |
+| qualified_name | TEXT | 层级限定名 |
+| parent_qualified_name | TEXT | 父级限定名 |
+| start_line | INTEGER | 起始行，1-based |
+| end_line | INTEGER | 结束行，1-based，闭区间 |
+| text | TEXT | 原始源码切片 |
+| structure_fingerprint | TEXT | AST 指纹 JSON |
+| text_fingerprint | TEXT | 文本指纹 JSON |
 | created_at | TIMESTAMP | 创建时间 |
 
-**唯一性约束**：`UNIQUE(repository, relative_path)` - 同一仓库中的相对路径唯一
+唯一性约束：
+
+```text
+UNIQUE(repository, relative_path, kind, qualified_name, start_line, end_line)
+```
+
+## 兼容性说明
+
+- 旧版“文件级 + `code/comment` 分离”的数据库与当前 schema 不兼容
+- 如果已有旧库，直接删除 `.db` 文件后重建
 
 ## 测试
 
-运行基础功能测试：
 ```bash
-python test/test_basic.py
+python test/run_all_tests.py
 ```
-
-## 项目结构
-
-```
-EvoCodeKB/
-├── main.py              # 命令行入口
-├── config.json          # 语言配置
-├── knowledgebase/       # 数据库目录
-│   └── test.db          # 知识库数据库
-├── src/
-│   ├── __init__.py
-│   └── code_kb.py       # 核心模块
-├── data/
-│   └── test/            # 数据集目录
-│       └── redis.zip    # 代码仓库压缩包
-├── test/
-│   ├── test_basic.py    # 基础功能测试
-│   └── test_cli.py      # 命令行测试
-└── docs/
-    └── README.md
-```
-
-## 技术栈
-
-- Python 3.7+
-- SQLite3
-- Pygments（词法分析）
-- zipfile（处理压缩包）
-
-## License
-
-MIT

@@ -1,10 +1,9 @@
 import hashlib
-import re
-import tokenize
-from io import StringIO
 from typing import List, Optional
 from tree_sitter_language_pack import get_parser
 from ..config.manager import TREE_SITTER_LANG_MAP
+
+_COMMENT_NODE_TYPES = frozenset({"comment", "line_comment", "block_comment"})
 
 
 class FingerprintTreeGenerator:
@@ -27,93 +26,73 @@ class FingerprintTreeGenerator:
 
     def generate_fp_tree(self, code: str, language: str) -> Optional[List[int]]:
         """
-        生成代码的指纹树
+        从代码文本生成指纹树（会重新解析）。
 
-        Args:
-            code: 代码字符串
-            language: 语言类型
-
-        Returns:
-            List[int]: 指纹树（整数哈希值列表），失败返回 None
+        用于检索阶段对查询代码生成指纹，以及无 AST 节点的 declaration_block 回退路径。
         """
         parser = self.get_parser(language)
         if parser is None:
             return None
 
         try:
-            code = self._remove_comments(code, language)
-        except Exception:
-            pass
-
-        try:
             tree = parser.parse(code.encode('utf-8'))
-            root_node = tree.root_node
-
-            fp_tree = []
-
-            def fingerprint_tree(node):
-                """后序遍历生成指纹"""
-                fp = "0"
-                if len(node.children) > 0:
-                    for child in node.children:
-                        fp = self._hash_str(fp + str(fingerprint_tree(child)))
-                else:
-                    fp = self._hash_str(fp + self._hash_str(node.type))
-
-                fp_tree.append(int(fp, 16))
-                return fp
-
-            fingerprint_tree(root_node)
-            return fp_tree
-
+            return self._traverse_node(tree.root_node)
         except Exception as e:
             print(f"警告: 生成指纹树失败: {e}")
             return None
 
+    def generate_fp_from_node(self, node) -> Optional[List[int]]:
+        """
+        从已有的 tree-sitter AST 节点直接生成指纹树，避免重复解析。
+
+        用于入库阶段——SemanticParser 已持有完整 AST，直接遍历子树即可。
+        """
+        try:
+            return self._traverse_node(node)
+        except Exception as e:
+            print(f"警告: 从 AST 节点生成指纹树失败: {e}")
+            return None
+
+    def _traverse_node(self, root_node) -> List[int]:
+        """迭代式后序遍历生成指纹树。"""
+        fp_tree = []
+
+        # stack 条目: (node, child_index)
+        # result_stack: 每个已处理节点的指纹 hex 字符串（注释节点为 None）
+        stack = [(root_node, 0)]
+        result_stack = []
+
+        while stack:
+            node, child_idx = stack[-1]
+
+            if node.type in _COMMENT_NODE_TYPES:
+                stack.pop()
+                result_stack.append(None)
+                continue
+
+            children = node.children
+            if child_idx < len(children):
+                stack[-1] = (node, child_idx + 1)
+                stack.append((children[child_idx], 0))
+            else:
+                stack.pop()
+                num_children = len(children)
+
+                if num_children > 0:
+                    fp = "0"
+                    child_fps = result_stack[-num_children:]
+                    del result_stack[-num_children:]
+                    for child_fp in child_fps:
+                        if child_fp is not None:
+                            fp = self._hash_str(fp + child_fp)
+                else:
+                    fp = self._hash_str("0" + self._hash_str(node.type))
+
+                fp_tree.append(int(fp[:16], 16))
+                result_stack.append(fp)
+
+        return fp_tree
+
     def _hash_str(self, s: str) -> str:
         """MD5 哈希字符串，返回16进制"""
         return hashlib.md5(s.encode()).hexdigest()
-
-    def _remove_comments(self, source: str, language: str) -> str:
-        """剥离注释和文档字符串"""
-        if language == 'Python':
-            io_obj = StringIO(source)
-            out = ""
-            prev_toktype = tokenize.INDENT
-            last_lineno = -1
-            last_col = 0
-            for tok in tokenize.generate_tokens(io_obj.readline):
-                token_type = tok[0]
-                token_string = tok[1]
-                start_line, start_col = tok[2]
-                end_line, end_col = tok[3]
-                if start_line > last_lineno:
-                    last_col = 0
-                if start_col > last_col:
-                    out += (" " * (start_col - last_col))
-                if token_type == tokenize.COMMENT:
-                    pass
-                elif token_type == tokenize.STRING:
-                    if prev_toktype != tokenize.INDENT:
-                        if prev_toktype != tokenize.NEWLINE:
-                            if start_col > 0:
-                                out += token_string
-                else:
-                    out += token_string
-                prev_toktype = token_type
-                last_col = end_col
-                last_lineno = end_line
-            return '\n'.join(x for x in out.split('\n') if x.strip())
-        elif language in ('C', 'C++', 'Java'):
-            def replacer(match):
-                s = match.group(0)
-                if s.startswith('/'):
-                    return " "
-                return s
-            pattern = re.compile(
-                r'//.*?$|/\*.*?\*/|\'(?:\\.|[^\\\'])*\'|"(?:\\.|[^\\"])*"',
-                re.DOTALL | re.MULTILINE
-            )
-            return '\n'.join(x for x in re.sub(pattern, replacer, source).split('\n') if x.strip())
-        else:
-            return source

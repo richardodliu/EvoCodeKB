@@ -32,7 +32,7 @@ def test_ext_to_language():
     lang = config_mgr.get_language(".c")
     assert lang == "C", f"'.c' 应该映射到 'C'，实际是 '{lang}'"
 
-    # 测试 .h 扩展名
+    # 测试 .h 扩展名（C/C++ 统一为 "C"）
     lang = config_mgr.get_language(".h")
     assert lang == "C", f"'.h' 应该映射到 'C'，实际是 '{lang}'"
 
@@ -44,7 +44,7 @@ def test_nonexistent_language():
     config_mgr = ConfigManager()
 
     result = config_mgr.get_language(".nonexistent")
-    assert result == "unknown", "不存在的扩展名应该返回 'unknown'"
+    assert result is None, "不存在的扩展名应该返回 None"
 
     print("✓ test_nonexistent_language passed")
 
@@ -54,7 +54,7 @@ def test_nonexistent_extension():
     config_mgr = ConfigManager()
 
     result = config_mgr.get_language(".xyz")
-    assert result == "unknown", "不存在的扩展名应该返回 'unknown'"
+    assert result is None, "不存在的扩展名应该返回 None"
 
     print("✓ test_nonexistent_extension passed")
 
@@ -68,9 +68,10 @@ def test_case_sensitivity():
     # 测试大写扩展名
     lang2 = config_mgr.get_language(".C")
 
-    # 根据实现，可能大小写敏感或不敏感
-    # 这里只验证返回值是合理的
-    assert lang1 is not None or lang2 is not None, "至少一个应该返回有效语言"
+    # 配置中的扩展名是小写 ".c"，所以小写应该匹配成功
+    assert lang1 == "C", f"'.c' 应该映射到 'C'，实际是 '{lang1}'"
+    # 大写 ".C" 不在配置中，应该返回 None
+    assert lang2 is None, f"'.C' 应该返回 None（大小写敏感），实际是 '{lang2}'"
 
     print("✓ test_case_sensitivity passed")
 
@@ -79,12 +80,14 @@ def test_multiple_extensions_same_language():
     """测试同一语言的多个扩展名"""
     config_mgr = ConfigManager()
 
-    # C 有多个扩展名
-    c_exts = [".c", ".h"]
-    for ext in c_exts:
+    c_lang = config_mgr.get_language(".c")
+    assert c_lang == "C", f".c 应该映射到 'C'，实际是 '{c_lang}'"
+
+    cpp_exts = [".h", ".hpp", ".cc", ".cxx", ".hh"]
+    for ext in cpp_exts:
         lang = config_mgr.get_language(ext)
-        if lang != "unknown":
-            assert lang == "C", f"{ext} 应该映射到 'C'"
+        assert lang is not None, f"{ext} 应在配置中存在映射"
+        assert lang == "C", f"{ext} 应该映射到 'C'，实际是 '{lang}'"
 
     print("✓ test_multiple_extensions_same_language passed")
 
@@ -94,10 +97,14 @@ def test_config_structure():
     config_mgr = ConfigManager()
 
     languages = config_mgr.languages
-    if languages is not None:
-        # 验证配置包含必要的字段
-        assert isinstance(languages, list), "配置应该是列表"
-        # 可以添加更多字段验证
+    assert languages is not None, "languages 不应为 None"
+    assert isinstance(languages, list), "配置应该是列表"
+    assert len(languages) > 0, "至少应有一种语言配置"
+    for lang in languages:
+        assert "name" in lang, f"语言配置缺少 'name' 字段: {lang}"
+        assert "extensions" in lang, f"语言配置缺少 'extensions' 字段: {lang}"
+        assert isinstance(lang["extensions"], list), f"extensions 应为列表: {lang}"
+        assert len(lang["extensions"]) > 0, f"语言 {lang['name']} 的 extensions 不应为空"
 
     print("✓ test_config_structure passed")
 

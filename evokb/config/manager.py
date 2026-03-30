@@ -5,10 +5,8 @@ from typing import Dict, List
 
 # Tree-sitter 语言映射（统一管理）
 TREE_SITTER_LANG_MAP = {
-    "C": "c",
-    "C++": "cpp",
-    "Python": "python",
-    "Java": "java"
+    "C": "cpp",
+    "Java": "java",
 }
 
 # 支持语法检查/指纹生成的语言列表
@@ -51,8 +49,16 @@ class ConfigManager:
 
     def _load_config(self):
         """加载配置文件"""
-        with open(self.config_path, 'r') as f:
-            config = json.load(f)
+        try:
+            with open(self.config_path, 'r') as f:
+                config = json.load(f)
+        except FileNotFoundError:
+            raise FileNotFoundError(f"配置文件不存在: {self.config_path}")
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"配置文件格式错误 ({self.config_path}): {exc}")
+
+        if 'languages' not in config:
+            raise ValueError(f"配置文件缺少 'languages' 字段: {self.config_path}")
 
         self._lang_config = config['languages']
         self._ext_to_lang = {}
@@ -62,4 +68,4 @@ class ConfigManager:
 
     def get_language(self, file_extension: str) -> str:
         """根据文件扩展名获取语言"""
-        return self.ext_to_language.get(file_extension, 'unknown')
+        return self.ext_to_language.get(file_extension)

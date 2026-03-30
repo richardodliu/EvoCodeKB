@@ -1,4 +1,7 @@
 from .tree_generator import FingerprintTreeGenerator
-from .comment_generator import CommentFingerprintGenerator
+from .text_generator import TextFingerprintGenerator
 
-__all__ = ['FingerprintTreeGenerator', 'CommentFingerprintGenerator']
+__all__ = [
+    'FingerprintTreeGenerator',
+    'TextFingerprintGenerator',
+]

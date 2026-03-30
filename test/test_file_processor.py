@@ -67,7 +67,7 @@ def test_get_files_by_extension():
         processor = FileProcessor(config_mgr)
 
         # 创建多个文件
-        files = ["test1.c", "test2.c", "test.py", "test.txt"]
+        files = ["test1.c", "test2.c", "test.java", "test.txt"]
         for filename in files:
             filepath = os.path.join(temp_dir, filename)
             with open(filepath, 'w') as f:
@@ -77,9 +77,9 @@ def test_get_files_by_extension():
         c_files = processor.get_files_by_extension(temp_dir, [".c"])
         assert len(c_files) == 2, f"应该找到 2 个 .c 文件，实际找到 {len(c_files)} 个"
 
-        # 获取 .py 文件
-        py_files = processor.get_files_by_extension(temp_dir, [".py"])
-        assert len(py_files) == 1, f"应该找到 1 个 .py 文件，实际找到 {len(py_files)} 个"
+        # 获取 .java 文件
+        java_files = processor.get_files_by_extension(temp_dir, [".java"])
+        assert len(java_files) == 1, f"应该找到 1 个 .java 文件，实际找到 {len(java_files)} 个"
 
         print("✓ test_get_files_by_extension passed")
     finally:

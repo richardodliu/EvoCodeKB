@@ -1,202 +1,163 @@
 #!/usr/bin/env python3
-"""CodeRecord 模型单元测试"""
-import sys
+"""SemanticRecord 模型单元测试"""
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-
-from evokb.storage.models import CodeRecord
+import sys
 from datetime import datetime
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-def test_code_record_creation():
-    """测试创建 CodeRecord 实例"""
-    record = CodeRecord(
-        repository="test_repo",
-        relative_path="test.c",
-        text="int main() { return 0; }",
-        code="int main() { return 0; }",
-        comment="Test comment",
-        file_extension=".c",
-        language="C"
-    )
-
-    assert record.repository == "test_repo", "仓库名应该匹配"
-    assert record.relative_path == "test.c", "相对路径应该匹配"
-    assert record.text == "int main() { return 0; }", "文本应该匹配"
-    assert record.code == "int main() { return 0; }", "代码应该匹配"
-    assert record.comment == "Test comment", "注释应该匹配"
-    assert record.file_extension == ".c", "文件扩展名应该匹配"
-    assert record.language == "C", "语言应该匹配"
-    assert record.code_fingerprint is None, "默认指纹应该是 None"
-    assert record.comment_fingerprint is None, "默认注释指纹应该是 None"
-    assert record.created_at is None, "默认创建时间应该是 None"
-    assert record.id is None, "默认 ID 应该是 None"
-
-    print("✓ test_code_record_creation passed")
+from evokb.storage.models import SemanticRecord
 
 
-def test_code_record_with_optional_fields():
-    """测试带可选字段的 CodeRecord"""
+def build_record(**overrides):
+    data = {
+        "repository": "test_repo",
+        "relative_path": "src/test.c",
+        "file_extension": ".c",
+        "language": "C",
+        "kind": "function",
+        "node_type": "function_definition",
+        "symbol_name": "foo",
+        "qualified_name": "foo",
+        "parent_qualified_name": None,
+        "start_line": 10,
+        "end_line": 20,
+        "text": "int foo(void) {\n    return 1;\n}",
+        "structure_fingerprint": None,
+        "text_fingerprint": None,
+        "created_at": None,
+        "id": None,
+    }
+    data.update(overrides)
+    return SemanticRecord(**data)
+
+
+def test_semantic_record_creation():
+    record = build_record()
+
+    assert record.repository == "test_repo"
+    assert record.kind == "function"
+    assert record.qualified_name == "foo"
+    assert record.start_line == 10
+    assert record.end_line == 20
+    assert record.text.startswith("int foo")
+    assert record.structure_fingerprint is None
+    assert record.text_fingerprint is None
+
+    print("✓ test_semantic_record_creation passed")
+
+
+def test_semantic_record_optional_fields():
     now = datetime.now()
-    record = CodeRecord(
-        repository="test_repo",
-        relative_path="test.c",
-        text="code",
-        code="code",
-        comment="",
-        file_extension=".c",
-        language="C",
-        code_fingerprint="[1, 2, 3]",
-        comment_fingerprint="[4, 5, 6]",
+    record = build_record(
+        parent_qualified_name="Outer",
+        structure_fingerprint="[1, 2, 3]",
+        text_fingerprint="[4, 5, 6]",
         created_at=now,
-        id=123
+        id=7,
     )
 
-    assert record.code_fingerprint == "[1, 2, 3]", "指纹应该匹配"
-    assert record.comment_fingerprint == "[4, 5, 6]", "注释指纹应该匹配"
-    assert record.created_at == now, "创建时间应该匹配"
-    assert record.id == 123, "ID 应该匹配"
+    assert record.parent_qualified_name == "Outer"
+    assert record.structure_fingerprint == "[1, 2, 3]"
+    assert record.text_fingerprint == "[4, 5, 6]"
+    assert record.created_at == now
+    assert record.id == 7
 
-    print("✓ test_code_record_with_optional_fields passed")
+    print("✓ test_semantic_record_optional_fields passed")
 
 
 def test_to_dict():
-    """测试 to_dict() 序列化"""
-    record = CodeRecord(
-        repository="test_repo",
-        relative_path="test.c",
-        text="code",
-        code="code",
-        comment="comment",
-        file_extension=".c",
-        language="C",
-        id=1
-    )
-
+    record = build_record(kind="method", qualified_name="A::foo", parent_qualified_name="A")
     data = record.to_dict()
 
-    assert isinstance(data, dict), "结果应该是字典"
-    assert data['repository'] == "test_repo", "仓库名应该匹配"
-    assert data['relative_path'] == "test.c", "相对路径应该匹配"
-    assert data['text'] == "code", "文本应该匹配"
-    assert data['code'] == "code", "代码应该匹配"
-    assert data['comment'] == "comment", "注释应该匹配"
-    assert data['file_extension'] == ".c", "文件扩展名应该匹配"
-    assert data['language'] == "C", "语言应该匹配"
-    assert data['id'] == 1, "ID 应该匹配"
-    assert 'comment_fingerprint' in data, "字典应包含 comment_fingerprint 键"
-    assert data['comment_fingerprint'] is None, "未设置时 comment_fingerprint 应为 None"
+    assert data["kind"] == "method"
+    assert data["qualified_name"] == "A::foo"
+    assert data["parent_qualified_name"] == "A"
+    assert data["start_line"] == 10
+    assert "text_fingerprint" in data
 
     print("✓ test_to_dict passed")
 
 
 def test_from_dict():
-    """测试 from_dict() 反序列化"""
-    data = {
-        'repository': "test_repo",
-        'relative_path': "test.c",
-        'text': "code",
-        'code': "code",
-        'comment': "comment",
-        'file_extension': ".c",
-        'language': "C",
-        'id': 1
-    }
+    data = build_record(kind="type", symbol_name="Node", qualified_name="Node").to_dict()
+    record = SemanticRecord.from_dict(data)
 
-    record = CodeRecord.from_dict(data)
-
-    assert isinstance(record, CodeRecord), "结果应该是 CodeRecord 实例"
-    assert record.repository == "test_repo", "仓库名应该匹配"
-    assert record.relative_path == "test.c", "相对路径应该匹配"
-    assert record.text == "code", "文本应该匹配"
-    assert record.code == "code", "代码应该匹配"
-    assert record.comment == "comment", "注释应该匹配"
-    assert record.file_extension == ".c", "文件扩展名应该匹配"
-    assert record.language == "C", "语言应该匹配"
-    assert record.id == 1, "ID 应该匹配"
+    assert isinstance(record, SemanticRecord)
+    assert record.kind == "type"
+    assert record.symbol_name == "Node"
+    assert record.qualified_name == "Node"
 
     print("✓ test_from_dict passed")
 
 
 def test_round_trip_conversion():
-    """测试往返转换一致性"""
-    original = CodeRecord(
-        repository="test_repo",
-        relative_path="test.c",
-        text="code",
-        code="code",
-        comment="comment",
-        file_extension=".c",
-        language="C",
-        comment_fingerprint="[10, 20, 30]",
-        id=1
+    original = build_record(
+        kind="global",
+        symbol_name="VALUE",
+        qualified_name="global::VALUE",
+        text_fingerprint="[10, 20, 30]",
     )
 
-    # 转换为字典
-    data = original.to_dict()
+    restored = SemanticRecord.from_dict(original.to_dict())
 
-    # 从字典恢复
-    restored = CodeRecord.from_dict(data)
-
-    # 验证一致性
-    assert restored.repository == original.repository, "仓库名应该一致"
-    assert restored.relative_path == original.relative_path, "相对路径应该一致"
-    assert restored.text == original.text, "文本应该一致"
-    assert restored.code == original.code, "代码应该一致"
-    assert restored.comment == original.comment, "注释应该一致"
-    assert restored.file_extension == original.file_extension, "文件扩展名应该一致"
-    assert restored.language == original.language, "语言应该一致"
-    assert restored.comment_fingerprint == original.comment_fingerprint, "注释指纹应该一致"
-    assert restored.id == original.id, "ID 应该一致"
+    assert restored.repository == original.repository
+    assert restored.relative_path == original.relative_path
+    assert restored.file_extension == original.file_extension
+    assert restored.language == original.language
+    assert restored.kind == original.kind
+    assert restored.node_type == original.node_type
+    assert restored.symbol_name == original.symbol_name
+    assert restored.qualified_name == original.qualified_name
+    assert restored.parent_qualified_name == original.parent_qualified_name
+    assert restored.start_line == original.start_line
+    assert restored.end_line == original.end_line
+    assert restored.text == original.text
+    assert restored.structure_fingerprint == original.structure_fingerprint
+    assert restored.text_fingerprint == original.text_fingerprint
+    assert restored.created_at == original.created_at
+    assert restored.id == original.id
 
     print("✓ test_round_trip_conversion passed")
 
 
-def test_empty_fields():
-    """测试空字段处理"""
-    record = CodeRecord(
-        repository="",
-        relative_path="",
-        text="",
-        code="",
-        comment="",
-        file_extension="",
-        language=""
-    )
+def test_empty_text_record():
+    record = build_record(text="", start_line=1, end_line=1)
 
-    assert record.repository == "", "空仓库名应该被接受"
-    assert record.text == "", "空文本应该被接受"
-    assert record.code == "", "空代码应该被接受"
+    assert record.text == ""
+    assert record.start_line == 1
+    assert record.end_line == 1
 
-    print("✓ test_empty_fields passed")
+    print("✓ test_empty_text_record passed")
 
 
 def main():
-    print("Testing CodeRecord...")
+    print("Testing SemanticRecord...")
     print("=" * 60)
 
     try:
-        test_code_record_creation()
-        test_code_record_with_optional_fields()
+        test_semantic_record_creation()
+        test_semantic_record_optional_fields()
         test_to_dict()
         test_from_dict()
         test_round_trip_conversion()
-        test_empty_fields()
+        test_empty_text_record()
 
         print("=" * 60)
-        print("✓ All CodeRecord tests passed!")
+        print("✓ All SemanticRecord tests passed!")
         return 0
-    except AssertionError as e:
+    except AssertionError as exc:
         print("=" * 60)
-        print(f"✗ Test failed: {e}")
+        print(f"✗ Test failed: {exc}")
         return 1
-    except Exception as e:
+    except Exception as exc:
         print("=" * 60)
-        print(f"✗ Unexpected error: {e}")
+        print(f"✗ Unexpected error: {exc}")
         import traceback
+
         traceback.print_exc()
         return 1
 
 
 if __name__ == "__main__":
-    exit(main())
+    raise SystemExit(main())

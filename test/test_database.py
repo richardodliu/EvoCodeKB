@@ -1,244 +1,346 @@
 #!/usr/bin/env python3
 """Database 单元测试"""
-import sys
 import os
+import sqlite3
+import sys
 import tempfile
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from evokb.storage.database import Database
-from evokb.storage.models import CodeRecord
+from evokb.storage.models import SemanticRecord
 
 
 def setup_test_db():
-    """创建临时测试数据库"""
-    return tempfile.mktemp(suffix='.db')
+    return tempfile.mktemp(suffix=".db")
 
 
 def cleanup_test_db(db_path):
-    """清理测试数据库"""
     if os.path.exists(db_path):
         os.remove(db_path)
 
 
+def build_record(**overrides):
+    data = {
+        "repository": "repo1",
+        "relative_path": "src/test.c",
+        "file_extension": ".c",
+        "language": "C",
+        "kind": "function",
+        "node_type": "function_definition",
+        "symbol_name": "foo",
+        "qualified_name": "foo",
+        "parent_qualified_name": None,
+        "start_line": 3,
+        "end_line": 5,
+        "text": "int foo(void) { return 1; }",
+        "structure_fingerprint": "[1, 2, 3]",
+        "text_fingerprint": "[4, 5, 6]",
+    }
+    data.update(overrides)
+    return SemanticRecord(**data)
+
+
 def test_database_initialization():
-    """测试数据库初始化"""
     db_path = setup_test_db()
     try:
         db = Database(db_path)
-        assert os.path.exists(db_path), "数据库文件应该被创建"
+        assert os.path.exists(db_path)
 
-        # 验证表是否创建
-        import sqlite3
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='code_knowledge'")
-        result = cursor.fetchone()
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='code_knowledge'"
+        )
+        assert cursor.fetchone() is not None
         conn.close()
-        assert result is not None, "code_knowledge 表应该被创建"
-
         print("✓ test_database_initialization passed")
     finally:
         cleanup_test_db(db_path)
 
 
-def test_insert_record():
-    """测试插入记录"""
+def test_insert_and_query_record():
     db_path = setup_test_db()
     try:
         db = Database(db_path)
-
-        record = CodeRecord(
-            repository="test_repo",
-            relative_path="test.c",
-            text="int main() { return 0; }",
-            code="int main() { return 0; }",
-            comment="Test comment",
-            file_extension=".c",
-            language="C",
-            code_fingerprint="[1, 2, 3]",
-            comment_fingerprint="[4, 5, 6]"
-        )
-
-        db.insert(record)
-
-        # 验证插入
-        results = db.query()
-        assert len(results) == 1, f"应该有 1 条记录，实际有 {len(results)} 条"
-        assert results[0].repository == "test_repo", "仓库名应该匹配"
-        assert results[0].language == "C", "语言应该匹配"
-        assert results[0].comment_fingerprint == "[4, 5, 6]", "注释指纹应该匹配"
-
-        print("✓ test_insert_record passed")
-    finally:
-        cleanup_test_db(db_path)
-
-
-def test_insert_duplicate():
-    """测试插入重复记录"""
-    db_path = setup_test_db()
-    try:
-        db = Database(db_path)
-
-        record = CodeRecord(
-            repository="test_repo",
-            relative_path="test.c",
-            text="int main() { return 0; }",
-            code="int main() { return 0; }",
-            comment="",
-            file_extension=".c",
-            language="C"
-        )
-
-        # 第一次插入
-        db.insert(record)
-
-        # 第二次插入相同记录（应该被忽略或更新）
+        record = build_record()
         db.insert(record)
 
         results = db.query()
-        # 由于有唯一约束，应该只有一条记录
-        assert len(results) == 1, "重复插入应该被处理"
-
-        print("✓ test_insert_duplicate passed")
+        assert len(results) == 1
+        assert results[0].qualified_name == "foo"
+        assert results[0].structure_fingerprint == "[1, 2, 3]"
+        assert results[0].text_fingerprint == "[4, 5, 6]"
+        print("✓ test_insert_and_query_record passed")
     finally:
         cleanup_test_db(db_path)
 
 
-def test_query_by_language():
-    """测试按语言查询"""
+def test_insert_duplicate_replaces():
     db_path = setup_test_db()
     try:
         db = Database(db_path)
+        db.insert(build_record(text="old"))
+        db.insert(build_record(text="new"))
 
-        # 插入不同语言的记录
-        record_c = CodeRecord(
-            repository="test_repo",
-            relative_path="test.c",
-            text="int main() {}",
-            code="int main() {}",
-            comment="",
-            file_extension=".c",
-            language="C"
-        )
-        record_py = CodeRecord(
-            repository="test_repo",
-            relative_path="test.py",
-            text="def main(): pass",
-            code="def main(): pass",
-            comment="",
-            file_extension=".py",
-            language="Python"
-        )
-
-        db.insert(record_c)
-        db.insert(record_py)
-
-        # 查询 C 语言
-        results = db.query(language="C")
-        assert len(results) == 1, f"应该有 1 条 C 记录，实际有 {len(results)} 条"
-        assert results[0].language == "C", "查询结果应该是 C 语言"
-
-        # 查询 Python
-        results = db.query(language="Python")
-        assert len(results) == 1, f"应该有 1 条 Python 记录，实际有 {len(results)} 条"
-        assert results[0].language == "Python", "查询结果应该是 Python"
-
-        print("✓ test_query_by_language passed")
+        results = db.query()
+        assert len(results) == 1
+        assert results[0].text == "new"
+        print("✓ test_insert_duplicate_replaces passed")
     finally:
         cleanup_test_db(db_path)
 
 
-def test_query_by_repository():
-    """测试按仓库查询"""
+def test_query_filters():
     db_path = setup_test_db()
     try:
         db = Database(db_path)
-
-        # 插入不同仓库的记录
-        record1 = CodeRecord(
-            repository="repo1",
-            relative_path="test.c",
-            text="code1",
-            code="code1",
-            comment="",
-            file_extension=".c",
-            language="C"
-        )
-        record2 = CodeRecord(
-            repository="repo2",
-            relative_path="test.c",
-            text="code2",
-            code="code2",
-            comment="",
-            file_extension=".c",
-            language="C"
+        db.insert(build_record(repository="repo1", language="C", kind="function"))
+        db.insert(
+            build_record(
+                repository="repo2",
+                relative_path="pkg/Test.java",
+                file_extension=".java",
+                language="Java",
+                kind="type",
+                node_type="class_declaration",
+                symbol_name="Test",
+                qualified_name="Test",
+            )
         )
 
-        db.insert(record1)
-        db.insert(record2)
-
-        # 查询 repo1
-        results = db.query(repository="repo1")
-        assert len(results) == 1, f"应该有 1 条 repo1 记录，实际有 {len(results)} 条"
-        assert results[0].repository == "repo1", "查询结果应该是 repo1"
-
-        print("✓ test_query_by_repository passed")
+        assert len(db.query(language="C")) == 1
+        assert len(db.query(repository="repo2")) == 1
+        assert len(db.query(kind="type")) == 1
+        print("✓ test_query_filters passed")
     finally:
         cleanup_test_db(db_path)
 
 
 def test_get_stats():
-    """测试统计信息"""
     db_path = setup_test_db()
     try:
         db = Database(db_path)
-
-        # 插入测试数据
-        for i in range(5):
-            record = CodeRecord(
-                repository="test_repo",
-                relative_path=f"test{i}.c",
-                text=f"code{i}",
-                code=f"code{i}",
-                comment="",
-                file_extension=".c",
-                language="C"
+        db.insert(build_record(kind="function"))
+        db.insert(
+            build_record(
+                relative_path="src/test2.c",
+                symbol_name="Node",
+                qualified_name="Node",
+                kind="type",
+                node_type="struct_specifier",
             )
-            db.insert(record)
+        )
 
         stats = db.get_stats()
-        assert stats['total_files'] == 5, f"应该有 5 条记录，实际有 {stats['total_files']} 条"
-        assert 'C' in stats['by_language'], "统计中应该包含 C 语言"
-        assert stats['by_language']['C'] == 5, f"C 语言应该有 5 条记录"
-
+        assert stats["total_entries"] == 2
+        assert stats["by_language"]["C"] == 2
+        assert stats["by_repository"]["repo1"] == 2
+        assert stats["by_kind"]["function"] == 1
+        assert stats["by_kind"]["type"] == 1
         print("✓ test_get_stats passed")
     finally:
         cleanup_test_db(db_path)
 
 
-def test_query_all():
-    """测试查询所有记录"""
+def test_search_text():
     db_path = setup_test_db()
     try:
         db = Database(db_path)
+        db.insert(build_record(text="int foo(void) { return 1; }"))
+        db.insert(build_record(relative_path="x.c", qualified_name="global::VALUE", symbol_name="VALUE", kind="global", text="VALUE = 1"))
 
-        # 插入多条记录
-        for i in range(3):
-            record = CodeRecord(
-                repository="test_repo",
-                relative_path=f"test{i}.c",
-                text=f"code{i}",
-                code=f"code{i}",
-                comment="",
-                file_extension=".c",
-                language="C"
+        results = db.search("foo", kind="function")
+        assert len(results) == 1
+        assert results[0].qualified_name == "foo"
+        print("✓ test_search_text passed")
+    finally:
+        cleanup_test_db(db_path)
+
+
+def test_query_fingerprints():
+    db_path = setup_test_db()
+    try:
+        db = Database(db_path)
+        db.insert(build_record())
+
+        rows = db.query_fingerprints()
+        assert len(rows) == 1
+        assert rows[0]["qualified_name"] == "foo"
+        assert rows[0]["structure_fingerprint"] == "[1, 2, 3]"
+        assert rows[0]["text_fingerprint"] == "[4, 5, 6]"
+        print("✓ test_query_fingerprints passed")
+    finally:
+        cleanup_test_db(db_path)
+
+
+def test_insert_many_batch():
+    db_path = setup_test_db()
+    try:
+        db = Database(db_path)
+        records = [
+            build_record(
+                relative_path=f"src/test{i}.c",
+                symbol_name=f"func{i}",
+                qualified_name=f"func{i}",
             )
-            db.insert(record)
+            for i in range(5)
+        ]
+        db.insert_many(records)
 
         results = db.query()
-        assert len(results) == 3, f"应该有 3 条记录，实际有 {len(results)} 条"
+        assert len(results) == 5, f"批量插入 5 条，实际 {len(results)}"
+        names = {r.qualified_name for r in results}
+        assert names == {f"func{i}" for i in range(5)}
 
-        print("✓ test_query_all passed")
+        # 验证批量时间戳一致
+        timestamps = {r.created_at for r in results}
+        assert len(timestamps) == 1, f"同批次记录应有相同时间戳，实际 {len(timestamps)} 个不同值"
+
+        print("✓ test_insert_many_batch passed")
+    finally:
+        cleanup_test_db(db_path)
+
+
+def test_insert_many_empty():
+    db_path = setup_test_db()
+    try:
+        db = Database(db_path)
+        db.insert_many([])
+        assert db.query() == []
+        print("✓ test_insert_many_empty passed")
+    finally:
+        cleanup_test_db(db_path)
+
+
+def test_query_by_ids():
+    db_path = setup_test_db()
+    try:
+        db = Database(db_path)
+        records = [
+            build_record(
+                relative_path=f"src/test{i}.c",
+                symbol_name=f"func{i}",
+                qualified_name=f"func{i}",
+            )
+            for i in range(3)
+        ]
+        db.insert_many(records)
+
+        all_records = db.query()
+        ids = [r.id for r in all_records]
+
+        # 查询部分 id
+        subset = db.query_by_ids(ids[:2])
+        assert len(subset) == 2, f"查询 2 个 id 应返回 2 条，实际 {len(subset)}"
+        subset_names = {r.qualified_name for r in subset}
+        expected_names = {all_records[0].qualified_name, all_records[1].qualified_name}
+        assert subset_names == expected_names
+
+        # 空 id 列表
+        assert db.query_by_ids([]) == []
+
+        # 不存在的 id
+        assert db.query_by_ids([99999]) == []
+
+        print("✓ test_query_by_ids passed")
+    finally:
+        cleanup_test_db(db_path)
+
+
+def test_query_retrieval_candidates_basic():
+    db_path = setup_test_db()
+    try:
+        db = Database(db_path)
+        db.insert(build_record())
+
+        rows = db.query_retrieval_candidates()
+        assert len(rows) == 1
+        assert rows[0]["qualified_name"] == "foo"
+        assert rows[0]["structure_fingerprint"] == "[1, 2, 3]"
+        assert rows[0]["text_fingerprint"] == "[4, 5, 6]"
+        assert "text" not in rows[0], "默认不应包含 text 列"
+
+        print("✓ test_query_retrieval_candidates_basic passed")
+    finally:
+        cleanup_test_db(db_path)
+
+
+def test_query_retrieval_candidates_include_text():
+    db_path = setup_test_db()
+    try:
+        db = Database(db_path)
+        db.insert(build_record())
+
+        rows = db.query_retrieval_candidates(include_text=True)
+        assert len(rows) == 1
+        assert "text" in rows[0], "include_text=True 应包含 text 列"
+        assert rows[0]["text"] == "int foo(void) { return 1; }"
+
+        print("✓ test_query_retrieval_candidates_include_text passed")
+    finally:
+        cleanup_test_db(db_path)
+
+
+def test_query_retrieval_candidates_language_filter():
+    db_path = setup_test_db()
+    try:
+        db = Database(db_path)
+        db.insert(build_record(language="C"))
+        db.insert(
+            build_record(
+                relative_path="pkg/Test.java",
+                file_extension=".java",
+                language="Java",
+                symbol_name="Test",
+                qualified_name="Test",
+            )
+        )
+
+        # 单语言字符串
+        rows_c = db.query_retrieval_candidates(language="C")
+        assert len(rows_c) == 1
+        assert rows_c[0]["language"] == "C"
+
+        # 多语言元组 (IN 子句)
+        rows_both = db.query_retrieval_candidates(language=("C", "Java"))
+        assert len(rows_both) == 2
+
+        # 不存在的语言
+        rows_none = db.query_retrieval_candidates(language="Python")
+        assert len(rows_none) == 0
+
+        print("✓ test_query_retrieval_candidates_language_filter passed")
+    finally:
+        cleanup_test_db(db_path)
+
+
+def test_query_with_limit():
+    db_path = setup_test_db()
+    try:
+        db = Database(db_path)
+        for i in range(5):
+            db.insert(
+                build_record(
+                    relative_path=f"src/test{i}.c",
+                    symbol_name=f"func{i}",
+                    qualified_name=f"func{i}",
+                )
+            )
+
+        results = db.query(limit=3)
+        assert len(results) == 3, f"limit=3 应返回 3 条，实际 {len(results)}"
+
+        results_all = db.query()
+        assert len(results_all) == 5
+
+        # limit=0 和 limit=-1 不应限制
+        results_zero = db.query(limit=0)
+        assert len(results_zero) == 5
+        results_neg = db.query(limit=-1)
+        assert len(results_neg) == 5
+
+        print("✓ test_query_with_limit passed")
     finally:
         cleanup_test_db(db_path)
 
@@ -249,27 +351,35 @@ def main():
 
     try:
         test_database_initialization()
-        test_insert_record()
-        test_insert_duplicate()
-        test_query_by_language()
-        test_query_by_repository()
+        test_insert_and_query_record()
+        test_insert_duplicate_replaces()
+        test_query_filters()
         test_get_stats()
-        test_query_all()
+        test_search_text()
+        test_query_fingerprints()
+        test_insert_many_batch()
+        test_insert_many_empty()
+        test_query_by_ids()
+        test_query_retrieval_candidates_basic()
+        test_query_retrieval_candidates_include_text()
+        test_query_retrieval_candidates_language_filter()
+        test_query_with_limit()
 
         print("=" * 60)
         print("✓ All Database tests passed!")
         return 0
-    except AssertionError as e:
+    except AssertionError as exc:
         print("=" * 60)
-        print(f"✗ Test failed: {e}")
+        print(f"✗ Test failed: {exc}")
         return 1
-    except Exception as e:
+    except Exception as exc:
         print("=" * 60)
-        print(f"✗ Unexpected error: {e}")
+        print(f"✗ Unexpected error: {exc}")
         import traceback
+
         traceback.print_exc()
         return 1
 
 
 if __name__ == "__main__":
-    exit(main())
+    raise SystemExit(main())

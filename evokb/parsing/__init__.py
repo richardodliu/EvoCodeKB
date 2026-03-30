@@ -1,3 +1,3 @@
-from .parser import CodeParser
+from .parser import CodeParser, SemanticParser
 
-__all__ = ['CodeParser']
+__all__ = ['SemanticParser', 'CodeParser']

@@ -1,6 +1,4 @@
 from pathlib import Path
-from typing import List
-from ..storage.models import CodeRecord
 
 
 class Importer:
@@ -31,6 +29,7 @@ class Importer:
 
         success_count = 0
         error_count = 0
+        entry_count = 0
 
         for file_path in files:
             try:
@@ -38,13 +37,14 @@ class Importer:
                 relative_path = str(Path(file_path).relative_to(directory))
 
                 # 处理文件
-                record = self.kb.process_file(file_path, repository, relative_path)
-                self.kb.database.insert(record)
+                records = self.kb.process_file(file_path, repository, relative_path)
+                self.kb.database.insert_many(records)
 
                 success_count += 1
+                entry_count += len(records)
             except Exception as e:
                 error_count += 1
                 if error_count <= 3:
                     print(f"  错误: {file_path}: {e}")
 
-        print(f"导入完成: 成功 {success_count}, 失败 {error_count}")
+        print(f"导入完成: 成功 {success_count}, 失败 {error_count}, 条目 {entry_count}")

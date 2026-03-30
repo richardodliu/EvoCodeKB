@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 # 所有测试文件
 TEST_FILES = [
     'test/test_fingerprint_tree_generator.py',
-    'test/test_comment_fingerprint_generator.py',
+    'test/test_text_fingerprint_generator.py',
     'test/test_knowledge_retrieval.py',
     'test/test_information_retrieval.py',
     'test/test_database.py',

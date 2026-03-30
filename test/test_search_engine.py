@@ -1,189 +1,207 @@
 #!/usr/bin/env python3
 """SearchEngine 单元测试"""
-import sys
 import os
+import sys
 import tempfile
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from evokb.search.engine import SearchEngine
 from evokb.storage.database import Database
-from evokb.storage.models import CodeRecord
+from evokb.storage.models import SemanticRecord
 
 
 def setup_test_db():
-    """创建临时测试数据库"""
-    return tempfile.mktemp(suffix='.db')
+    return tempfile.mktemp(suffix=".db")
 
 
 def cleanup_test_db(db_path):
-    """清理测试数据库"""
     if os.path.exists(db_path):
         os.remove(db_path)
 
 
+def build_record(**overrides):
+    data = {
+        "repository": "repo1",
+        "relative_path": "src/test.c",
+        "file_extension": ".c",
+        "language": "C",
+        "kind": "function",
+        "node_type": "function_definition",
+        "symbol_name": "main",
+        "qualified_name": "main",
+        "parent_qualified_name": None,
+        "start_line": 1,
+        "end_line": 3,
+        "text": 'int main() { printf("hello"); }',
+        "structure_fingerprint": None,
+        "text_fingerprint": None,
+    }
+    data.update(overrides)
+    return SemanticRecord(**data)
+
+
 def test_search_keyword():
-    """测试关键词搜索"""
     db_path = setup_test_db()
     try:
         db = Database(db_path)
         search_engine = SearchEngine(db)
 
-        # 插入测试数据
-        record1 = CodeRecord(
-            repository="test_repo",
-            relative_path="test1.c",
-            text="int main() { printf(\"Hello World\"); }",
-            code="int main() { printf(\"Hello World\"); }",
-            comment="",
-            file_extension=".c",
-            language="C"
-        )
-        record2 = CodeRecord(
-            repository="test_repo",
-            relative_path="test2.c",
-            text="int foo() { return 42; }",
-            code="int foo() { return 42; }",
-            comment="",
-            file_extension=".c",
-            language="C"
+        db.insert(build_record())
+        db.insert(
+            build_record(
+                relative_path="src/value.c",
+                kind="global",
+                node_type="declaration",
+                symbol_name="VALUE",
+                qualified_name="global::VALUE",
+                text="int VALUE = 42;",
+            )
         )
 
-        db.insert(record1)
-        db.insert(record2)
-
-        # 搜索 "main"
         results = search_engine.search("main")
-        assert len(results) == 1, f"应该找到 1 条包含 'main' 的记录，实际找到 {len(results)} 条"
-        assert "main" in results[0]['text'], "结果应该包含 'main'"
-
-        # 搜索 "foo"
-        results = search_engine.search("foo")
-        assert len(results) == 1, f"应该找到 1 条包含 'foo' 的记录"
-
+        assert len(results) == 1
+        assert results[0]["qualified_name"] == "main"
         print("✓ test_search_keyword passed")
     finally:
         cleanup_test_db(db_path)
 
 
 def test_search_empty_query():
-    """测试空查询"""
     db_path = setup_test_db()
     try:
         db = Database(db_path)
         search_engine = SearchEngine(db)
 
-        results = search_engine.search("")
-        # 空查询应该返回所有记录或空列表
-        assert isinstance(results, list), "结果应该是列表"
+        db.insert(build_record())
+        db.insert(
+            build_record(
+                relative_path="src/other.c",
+                symbol_name="foo",
+                qualified_name="foo",
+                text="int foo() { return 1; }",
+            )
+        )
 
+        results = search_engine.search("")
+        assert isinstance(results, list)
+        assert len(results) == 2, f"空查询应匹配所有记录，实际 {len(results)}"
         print("✓ test_search_empty_query passed")
     finally:
         cleanup_test_db(db_path)
 
 
-def test_search_with_repository_filter():
-    """测试仓库过滤"""
+def test_search_special_characters():
     db_path = setup_test_db()
     try:
         db = Database(db_path)
         search_engine = SearchEngine(db)
 
-        # 插入不同仓库的数据
-        record1 = CodeRecord(
-            repository="repo1",
-            relative_path="test.c",
-            text="int main() {}",
-            code="int main() {}",
-            comment="",
-            file_extension=".c",
-            language="C"
-        )
-        record2 = CodeRecord(
-            repository="repo2",
-            relative_path="test.c",
-            text="int main() {}",
-            code="int main() {}",
-            comment="",
-            file_extension=".c",
-            language="C"
+        db.insert(build_record(text="100% complete"))
+        db.insert(
+            build_record(
+                relative_path="src/other.c",
+                symbol_name="under_score",
+                qualified_name="under_score",
+                text="int _value = 42;",
+            )
         )
 
-        db.insert(record1)
-        db.insert(record2)
+        results_percent = search_engine.search("%")
+        assert len(results_percent) == 1, f"'%' 搜索应只匹配含 '%' 的记录，实际 {len(results_percent)}"
+        assert "100% complete" in results_percent[0]["text"]
 
-        # 搜索 repo1
+        results_underscore = search_engine.search("_value")
+        assert len(results_underscore) == 1, f"'_value' 搜索应精确匹配，实际 {len(results_underscore)}"
+        assert results_underscore[0]["symbol_name"] == "under_score"
+
+        print("✓ test_search_special_characters passed")
+    finally:
+        cleanup_test_db(db_path)
+
+
+def test_search_with_shots_limit():
+    db_path = setup_test_db()
+    try:
+        db = Database(db_path)
+        search_engine = SearchEngine(db)
+
+        for i in range(5):
+            db.insert(
+                build_record(
+                    relative_path=f"src/test{i}.c",
+                    symbol_name=f"func{i}",
+                    qualified_name=f"func{i}",
+                    text=f"int func{i}() {{ return {i}; }}",
+                )
+            )
+
+        results = search_engine.search("func", shots=3)
+        assert len(results) == 3, f"shots=3 应返回 3 条，实际 {len(results)}"
+
+        results_all = search_engine.search("func")
+        assert len(results_all) == 5, f"无限制应返回全部 5 条，实际 {len(results_all)}"
+
+        print("✓ test_search_with_shots_limit passed")
+    finally:
+        cleanup_test_db(db_path)
+
+
+def test_search_with_repository_filter():
+    db_path = setup_test_db()
+    try:
+        db = Database(db_path)
+        search_engine = SearchEngine(db)
+
+        db.insert(build_record(repository="repo1"))
+        db.insert(build_record(repository="repo2", relative_path="src/other.c"))
+
         results = search_engine.search("main", repository="repo1")
-        assert len(results) == 1, f"应该找到 1 条 repo1 的记录"
-        assert results[0]['repository'] == "repo1", "结果应该来自 repo1"
-
+        assert len(results) == 1
+        assert results[0]["repository"] == "repo1"
         print("✓ test_search_with_repository_filter passed")
     finally:
         cleanup_test_db(db_path)
 
 
-def test_search_with_language_filter():
-    """测试语言过滤"""
+def test_search_with_language_and_kind_filter():
     db_path = setup_test_db()
     try:
         db = Database(db_path)
         search_engine = SearchEngine(db)
 
-        # 插入不同语言的数据
-        record_c = CodeRecord(
-            repository="test_repo",
-            relative_path="test.c",
-            text="int main() {}",
-            code="int main() {}",
-            comment="",
-            file_extension=".c",
-            language="C"
-        )
-        record_py = CodeRecord(
-            repository="test_repo",
-            relative_path="test.py",
-            text="def main(): pass",
-            code="def main(): pass",
-            comment="",
-            file_extension=".py",
-            language="Python"
+        db.insert(build_record(language="C", kind="function"))
+        db.insert(
+            build_record(
+                relative_path="pkg/Test.java",
+                file_extension=".java",
+                language="Java",
+                kind="type",
+                node_type="class_declaration",
+                symbol_name="Test",
+                qualified_name="Test",
+                text="class Test {\n    int value;\n}",
+            )
         )
 
-        db.insert(record_c)
-        db.insert(record_py)
-
-        # 搜索 C 语言
-        results = search_engine.search("main", language="C")
-        assert len(results) == 1, f"应该找到 1 条 C 语言记录"
-        assert results[0]['language'] == "C", "结果应该是 C 语言"
-
-        print("✓ test_search_with_language_filter passed")
+        results = search_engine.search("class", language="Java", kind="type")
+        assert len(results) == 1
+        assert results[0]["language"] == "Java"
+        assert results[0]["kind"] == "type"
+        print("✓ test_search_with_language_and_kind_filter passed")
     finally:
         cleanup_test_db(db_path)
 
 
 def test_search_no_results():
-    """测试无结果搜索"""
     db_path = setup_test_db()
     try:
         db = Database(db_path)
         search_engine = SearchEngine(db)
+        db.insert(build_record())
 
-        # 插入测试数据
-        record = CodeRecord(
-            repository="test_repo",
-            relative_path="test.c",
-            text="int main() {}",
-            code="int main() {}",
-            comment="",
-            file_extension=".c",
-            language="C"
-        )
-        db.insert(record)
-
-        # 搜索不存在的关键词
         results = search_engine.search("nonexistent_keyword_xyz")
-        assert len(results) == 0, "应该返回空结果"
-
+        assert results == []
         print("✓ test_search_no_results passed")
     finally:
         cleanup_test_db(db_path)
@@ -196,24 +214,27 @@ def main():
     try:
         test_search_keyword()
         test_search_empty_query()
+        test_search_special_characters()
+        test_search_with_shots_limit()
         test_search_with_repository_filter()
-        test_search_with_language_filter()
+        test_search_with_language_and_kind_filter()
         test_search_no_results()
 
         print("=" * 60)
         print("✓ All SearchEngine tests passed!")
         return 0
-    except AssertionError as e:
+    except AssertionError as exc:
         print("=" * 60)
-        print(f"✗ Test failed: {e}")
+        print(f"✗ Test failed: {exc}")
         return 1
-    except Exception as e:
+    except Exception as exc:
         print("=" * 60)
-        print(f"✗ Unexpected error: {e}")
+        print(f"✗ Unexpected error: {exc}")
         import traceback
+
         traceback.print_exc()
         return 1
 
 
 if __name__ == "__main__":
-    exit(main())
+    raise SystemExit(main())

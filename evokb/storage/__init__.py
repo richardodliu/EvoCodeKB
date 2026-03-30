@@ -1,4 +1,4 @@
 from .database import Database
-from .models import CodeRecord
+from .models import SemanticRecord
 
-__all__ = ['Database', 'CodeRecord']
+__all__ = ['Database', 'SemanticRecord']

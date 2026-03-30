@@ -5,6 +5,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from evokb.fingerprint.tree_generator import FingerprintTreeGenerator
+from evokb import DEFAULT_RECURSION_LIMIT, ensure_runtime
 
 
 def test_generate_fp_tree_valid_c_code():
@@ -23,21 +24,6 @@ def test_generate_fp_tree_valid_c_code():
     assert len(result) > 0, "指纹树不应为空"
     assert all(isinstance(x, int) for x in result), "所有元素应该是整数"
     print("✓ test_generate_fp_tree_valid_c_code passed")
-
-
-def test_generate_fp_tree_valid_python_code():
-    """测试有效 Python 代码生成指纹树"""
-    fp_gen = FingerprintTreeGenerator()
-    code = """
-def hello():
-    print("Hello World")
-    return 0
-    """
-    result = fp_gen.generate_fp_tree(code, "Python")
-    assert result is not None, "应该成功生成指纹树"
-    assert isinstance(result, list), "结果应该是列表"
-    assert len(result) > 0, "指纹树不应为空"
-    print("✓ test_generate_fp_tree_valid_python_code passed")
 
 
 def test_generate_fp_tree_empty_code():
@@ -71,18 +57,17 @@ def test_hash_consistency():
 
 
 def test_different_code_different_fingerprint():
-    """测试不同代码生成不同指纹"""
+    """测试结构不同的代码生成不同指纹"""
     fp_gen = FingerprintTreeGenerator()
     code1 = "int main() { return 0; }"
-    code2 = "int main() { return 1; }"
+    code2 = "int add(int a, int b) { return a + b; }"
 
     result1 = fp_gen.generate_fp_tree(code1, "C")
     result2 = fp_gen.generate_fp_tree(code2, "C")
 
-    # 由于代码非常相似，指纹可能相同或不同
-    # 这里只验证都能成功生成
     assert result1 is not None, "代码1应该生成指纹树"
     assert result2 is not None, "代码2应该生成指纹树"
+    assert result1 != result2, "结构不同的代码应生成不同的指纹树"
 
     print("✓ test_different_code_different_fingerprint passed")
 
@@ -107,8 +92,7 @@ def test_multiple_languages():
 
     test_cases = [
         ("C", "int main() { return 0; }"),
-        ("C++", "int main() { return 0; }"),
-        ("Python", "def main(): return 0"),
+        ("C", "int main() { return 0; }"),
         ("Java", "class Main { public static void main(String[] args) {} }"),
     ]
 
@@ -120,19 +104,28 @@ def test_multiple_languages():
     print("✓ test_multiple_languages passed")
 
 
+def test_recursion_limit_configured():
+    """测试调用 ensure_runtime 后提升 Python 递归上限"""
+    ensure_runtime()
+    assert (
+        sys.getrecursionlimit() >= DEFAULT_RECURSION_LIMIT
+    ), "调用 ensure_runtime() 后递归上限应该被提升"
+    print("✓ test_recursion_limit_configured passed")
+
+
 def main():
     print("Testing FingerprintTreeGenerator...")
     print("=" * 60)
 
     try:
         test_generate_fp_tree_valid_c_code()
-        test_generate_fp_tree_valid_python_code()
         test_generate_fp_tree_empty_code()
         test_generate_fp_tree_unsupported_language()
         test_hash_consistency()
         test_different_code_different_fingerprint()
         test_parser_caching()
         test_multiple_languages()
+        test_recursion_limit_configured()
 
         print("=" * 60)
         print("✓ All FingerprintTreeGenerator tests passed!")

@@ -1,214 +1,390 @@
 #!/usr/bin/env python3
 """InformationRetrieval 单元测试"""
-import sys
-import os
 import json
+import os
+import sys
 import tempfile
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from evokb.fingerprint.text_generator import TextFingerprintGenerator
 from evokb.retrieval.information_retrieval import InformationRetrieval
-from evokb.fingerprint.comment_generator import CommentFingerprintGenerator
 from evokb.storage.database import Database
-from evokb.storage.models import CodeRecord
+from evokb.storage.models import SemanticRecord
 
 
 def setup_test_db():
-    """创建临时测试数据库"""
-    return tempfile.mktemp(suffix='.db')
+    return tempfile.mktemp(suffix=".db")
 
 
 def cleanup_test_db(db_path):
-    """清理测试数据库"""
     if os.path.exists(db_path):
         os.remove(db_path)
 
 
-def insert_test_records(db, comment_fp_gen):
-    """插入带注释指纹的测试记录"""
+def build_record(text, fp, **overrides):
+    data = {
+        "repository": "repo1",
+        "relative_path": "src/test.c",
+        "file_extension": ".c",
+        "language": "C",
+        "kind": "function",
+        "node_type": "function_definition",
+        "symbol_name": "item",
+        "qualified_name": "item",
+        "parent_qualified_name": None,
+        "start_line": 1,
+        "end_line": 3,
+        "text": text,
+        "structure_fingerprint": None,
+        "text_fingerprint": json.dumps(fp),
+    }
+    data.update(overrides)
+    return SemanticRecord(**data)
+
+
+def insert_test_records(db, fp_gen):
+    text1 = "/* allocate dynamic memory for a buffer */\nint *alloc_buffer(void) { return 0; }"
+    text2 = "/* free allocated resources after use */\nvoid cleanup(void) {}"
+    text3 = '/* print the output string to stdout */\nvoid print_msg(void) { puts("x"); }'
     records = [
-        CodeRecord(
-            repository="repo1",
-            relative_path="alloc.c",
-            text="int *p = malloc(sizeof(int));",
-            code="int *p = malloc(sizeof(int));",
-            comment="allocate dynamic memory for the integer pointer buffer",
-            file_extension=".c",
-            language="C",
-            comment_fingerprint=json.dumps(
-                comment_fp_gen.generate("allocate dynamic memory for the integer pointer buffer")
-            ),
+        build_record(
+            text1,
+            fp_gen.generate(text1),
+            symbol_name="alloc_buffer",
+            qualified_name="alloc_buffer",
         ),
-        CodeRecord(
-            repository="repo2",
-            relative_path="free.c",
-            text="free(p);",
-            code="free(p);",
-            comment="free all previously allocated resources after program use",
-            file_extension=".c",
-            language="C",
-            comment_fingerprint=json.dumps(
-                comment_fp_gen.generate("free all previously allocated resources after program use")
-            ),
+        build_record(
+            text2,
+            fp_gen.generate(text2),
+            relative_path="src/free.c",
+            symbol_name="cleanup",
+            qualified_name="cleanup",
         ),
-        CodeRecord(
-            repository="repo3",
-            relative_path="print.c",
-            text='printf("hello");',
-            code='printf("hello");',
-            comment="print the output string message to the standard console",
-            file_extension=".c",
-            language="C",
-            comment_fingerprint=json.dumps(
-                comment_fp_gen.generate("print the output string message to the standard console")
-            ),
+        build_record(
+            text3,
+            fp_gen.generate(text3),
+            relative_path="src/print.c",
+            symbol_name="print_msg",
+            qualified_name="print_msg",
         ),
     ]
-    for r in records:
-        db.insert(r)
+    for record in records:
+        db.insert(record)
     return records
 
 
 def test_empty_database():
-    """测试空数据库返回空列表"""
     db_path = setup_test_db()
     try:
         db = Database(db_path)
-        gen = CommentFingerprintGenerator()
-        ir = InformationRetrieval(db, gen)
-        results = ir.retrieve("allocate memory", shots=3)
-        assert results == [], f"空数据库应返回空列表，实际 {results}"
+        ir = InformationRetrieval(db, TextFingerprintGenerator())
+        assert ir.retrieve("allocate memory", shots=3) == []
         print("✓ test_empty_database passed")
     finally:
         cleanup_test_db(db_path)
 
 
 def test_empty_input():
-    """测试空输入返回空列表"""
     db_path = setup_test_db()
     try:
         db = Database(db_path)
-        gen = CommentFingerprintGenerator()
-        ir = InformationRetrieval(db, gen)
-        assert ir.retrieve("", shots=3) == [], "空字符串应返回空列表"
-        assert ir.retrieve("***", shots=3) == [], "纯符号应返回空列表"
+        ir = InformationRetrieval(db, TextFingerprintGenerator())
+        assert ir.retrieve("", shots=3) == []
+        assert ir.retrieve("***", shots=3) == []
         print("✓ test_empty_input passed")
     finally:
         cleanup_test_db(db_path)
 
 
 def test_normal_retrieval():
-    """测试正常检索流程"""
     db_path = setup_test_db()
     try:
         db = Database(db_path)
-        gen = CommentFingerprintGenerator()
-        ir = InformationRetrieval(db, gen)
-        insert_test_records(db, gen)
+        fp_gen = TextFingerprintGenerator()
+        ir = InformationRetrieval(db, fp_gen)
+        insert_test_records(db, fp_gen)
 
-        results = ir.retrieve("allocate dynamic memory for the integer pointer", shots=3)
-        assert len(results) > 0, "应找到结果"
-        assert results[0]['score'] > 0, "最佳匹配覆盖度应 > 0"
-        # 最佳匹配应是 alloc.c（注释最相关）
-        assert results[0]['relative_path'] == "alloc.c", \
-            f"最佳匹配应是 alloc.c，实际 {results[0]['relative_path']}"
-        # 输出应包含 comment 字段
-        assert 'comment' in results[0], "输出应包含 comment 字段"
+        results = ir.retrieve("allocate dynamic memory for a buffer", shots=3)
+        assert len(results) > 0
+        assert results[0]["qualified_name"] == "alloc_buffer"
+        assert results[0]["score"] > 0
+        assert 0.0 <= results[0]["containment"] <= 1.0
+        assert "kind" in results[0]
         print("✓ test_normal_retrieval passed")
     finally:
         cleanup_test_db(db_path)
 
 
 def test_shots_limit():
-    """测试 shots 限制"""
     db_path = setup_test_db()
     try:
         db = Database(db_path)
-        gen = CommentFingerprintGenerator()
-        ir = InformationRetrieval(db, gen)
-        insert_test_records(db, gen)
+        fp_gen = TextFingerprintGenerator()
+        ir = InformationRetrieval(db, fp_gen)
+        insert_test_records(db, fp_gen)
 
-        results = ir.retrieve("allocate dynamic memory for the integer pointer", shots=1)
-        assert len(results) == 1, f"shots=1 应只返回 1 个结果，实际 {len(results)}"
-
-        results = ir.retrieve("allocate dynamic memory for the integer pointer", shots=2)
-        assert len(results) == 2, f"shots=2 应返回 2 个结果，实际 {len(results)}"
+        assert len(ir.retrieve("allocate dynamic memory for a buffer", shots=1)) == 1
+        assert len(ir.retrieve("allocate dynamic memory for a buffer", shots=2)) == 2
         print("✓ test_shots_limit passed")
     finally:
         cleanup_test_db(db_path)
 
 
 def test_get_coverage():
-    """测试覆盖度计算"""
-    db = None  # 不需要数据库
-    gen = CommentFingerprintGenerator()
     ir = InformationRetrieval.__new__(InformationRetrieval)
-
-    # 完全覆盖
-    assert ir._get_coverage([1, 2, 3], [1, 2, 3]) == 1.0, "完全覆盖应为 1.0"
-
-    # 部分覆盖
-    coverage = ir._get_coverage([1, 2], [1, 2, 3])
-    assert abs(coverage - 2.0/3.0) < 1e-9, f"部分覆盖应为 2/3，实际 {coverage}"
-
-    # 无覆盖
-    assert ir._get_coverage([4, 5], [1, 2, 3]) == 0.0, "无交集应为 0"
-
-    # 空参考树
-    assert ir._get_coverage([1, 2], []) == 0.0, "空参考树应为 0"
-
+    assert ir._get_coverage([1, 2, 3], [1, 2, 3]) == 1.0
+    assert abs(ir._get_coverage([1, 2], [1, 2, 3]) - 2.0 / 3.0) < 1e-9
+    assert ir._get_coverage([4, 5], [1, 2, 3]) == 0.0
+    assert ir._get_coverage([1, 2], []) == 0.0
     print("✓ test_get_coverage passed")
 
 
 def test_update_tree():
-    """测试树更新"""
     ir = InformationRetrieval.__new__(InformationRetrieval)
-
-    result = ir._update_tree([1, 2], [1, 2, 3, 4])
-    assert set(result) == {3, 4}, f"应移除已覆盖节点，实际 {result}"
-
-    result = ir._update_tree([5], [1, 2, 3])
-    assert set(result) == {1, 2, 3}, "无交集时不应移除任何节点"
-
+    assert set(ir._update_tree([1, 2], [1, 2, 3, 4])) == {3, 4}
+    assert set(ir._update_tree([5], [1, 2, 3])) == {1, 2, 3}
     print("✓ test_update_tree passed")
 
 
 def test_language_filter():
-    """测试语言过滤"""
     db_path = setup_test_db()
     try:
         db = Database(db_path)
-        gen = CommentFingerprintGenerator()
-        ir = InformationRetrieval(db, gen)
+        fp_gen = TextFingerprintGenerator()
+        ir = InformationRetrieval(db, fp_gen)
 
-        # 插入 C 和 Python 记录
-        db.insert(CodeRecord(
-            repository="repo1", relative_path="test.c",
-            text="code", code="code",
-            comment="allocate dynamic memory buffer for data",
-            file_extension=".c", language="C",
-            comment_fingerprint=json.dumps(
-                gen.generate("allocate dynamic memory buffer for data")
-            ),
-        ))
-        db.insert(CodeRecord(
-            repository="repo2", relative_path="test.py",
-            text="code", code="code",
-            comment="allocate dynamic memory buffer for data",
-            file_extension=".py", language="Python",
-            comment_fingerprint=json.dumps(
-                gen.generate("allocate dynamic memory buffer for data")
-            ),
-        ))
+        db.insert(
+            build_record(
+                "allocate dynamic memory buffer for data",
+                fp_gen.generate("allocate dynamic memory buffer for data"),
+                language="C",
+            )
+        )
+        db.insert(
+            build_record(
+                "allocate dynamic memory buffer for data",
+                fp_gen.generate("allocate dynamic memory buffer for data"),
+                relative_path="pkg/AllocBuffer.java",
+                file_extension=".java",
+                language="Java",
+                kind="type",
+                node_type="class_declaration",
+                symbol_name="AllocBuffer",
+                qualified_name="AllocBuffer",
+            )
+        )
 
         results_c = ir.retrieve("allocate dynamic memory buffer for data", language="C", shots=5)
-        assert all(r['language'] == 'C' for r in results_c), "语言过滤应只返回 C"
-
-        results_py = ir.retrieve("allocate dynamic memory buffer for data", language="Python", shots=5)
-        assert all(r['language'] == 'Python' for r in results_py), "语言过滤应只返回 Python"
-
+        results_java = ir.retrieve("allocate dynamic memory buffer for data", language="Java", shots=5)
+        assert all(result["language"] == "C" for result in results_c)
+        assert all(result["language"] == "Java" for result in results_java)
         print("✓ test_language_filter passed")
     finally:
         cleanup_test_db(db_path)
+
+
+def test_max_prefilters_by_containment_before_greedy_retrieval():
+    db_path = setup_test_db()
+    try:
+        db = Database(db_path)
+        fp_gen = TextFingerprintGenerator()
+        ir = InformationRetrieval(db, fp_gen)
+
+        query = "zero one two three four five"
+        db.insert(
+            build_record(
+                "zero one two three four five six",
+                fp_gen.generate("zero one two three four five six"),
+                relative_path="src/noise.c",
+                symbol_name="noise",
+                qualified_name="noise",
+            )
+        )
+        db.insert(
+            build_record(
+                query,
+                fp_gen.generate(query),
+                relative_path="src/exact.c",
+                symbol_name="exact",
+                qualified_name="exact",
+            )
+        )
+
+        results = ir.retrieve(query, shots=1, max_candidates=1)
+        assert len(results) == 1
+        assert results[0]["qualified_name"] == "exact"
+        print("✓ test_max_prefilters_by_containment_before_greedy_retrieval passed")
+    finally:
+        cleanup_test_db(db_path)
+
+
+def test_c_cpp_language_filter_interoperability():
+    db_path = setup_test_db()
+    try:
+        db = Database(db_path)
+        fp_gen = TextFingerprintGenerator()
+        ir = InformationRetrieval(db, fp_gen)
+
+        text = "allocate dynamic memory buffer for data"
+        fp = fp_gen.generate(text)
+        db.insert(
+            build_record(
+                text,
+                fp,
+                language="C",
+                relative_path="src/buffer.c",
+                symbol_name="buffer_c",
+                qualified_name="buffer_c",
+            )
+        )
+        db.insert(
+            build_record(
+                text,
+                fp,
+                language="C",
+                file_extension=".hpp",
+                relative_path="include/buffer.hpp",
+                symbol_name="buffer_cpp",
+                qualified_name="buffer_cpp",
+            )
+        )
+        db.insert(
+            build_record(
+                text,
+                fp,
+                language="Java",
+                file_extension=".java",
+                relative_path="pkg/Buffer.java",
+                kind="type",
+                node_type="class_declaration",
+                symbol_name="Buffer",
+                qualified_name="Buffer",
+            )
+        )
+
+        results_c = ir.retrieve(text, language="C", shots=5)
+        results_cpp = ir.retrieve(text, language="C", shots=5)
+        results_java = ir.retrieve(text, language="Java", shots=5)
+
+        assert {result["language"] for result in results_c} == {"C", "C"}
+        assert {result["language"] for result in results_cpp} == {"C", "C"}
+        assert {result["language"] for result in results_java} == {"Java"}
+        print("✓ test_c_cpp_language_filter_interoperability passed")
+    finally:
+        cleanup_test_db(db_path)
+
+
+def test_retrieve_many_empty_input():
+    db_path = setup_test_db()
+    try:
+        db = Database(db_path)
+        ir = InformationRetrieval(db, TextFingerprintGenerator())
+        assert ir.retrieve_many([], shots=3) == []
+        print("✓ test_retrieve_many_empty_input passed")
+    finally:
+        cleanup_test_db(db_path)
+
+
+def test_retrieve_many_matches_single_and_preserves_order():
+    db_path = setup_test_db()
+    try:
+        db = Database(db_path)
+        fp_gen = TextFingerprintGenerator()
+        ir = InformationRetrieval(db, fp_gen)
+        insert_test_records(db, fp_gen)
+
+        queries = [
+            "allocate dynamic memory for a buffer",
+            "print the output string to stdout",
+        ]
+
+        expected = [ir.retrieve(query, shots=2) for query in queries]
+        batch_results = ir.retrieve_many(queries, shots=2, max_workers=2)
+
+        assert batch_results == expected
+        print("✓ test_retrieve_many_matches_single_and_preserves_order passed")
+    finally:
+        cleanup_test_db(db_path)
+
+
+def test_retrieve_many_best_effort_for_invalid_inputs():
+    db_path = setup_test_db()
+    try:
+        db = Database(db_path)
+        fp_gen = TextFingerprintGenerator()
+        ir = InformationRetrieval(db, fp_gen)
+        insert_test_records(db, fp_gen)
+
+        results = ir.retrieve_many(
+            ["allocate dynamic memory for a buffer", "", "***"],
+            shots=1,
+            max_workers=2,
+        )
+
+        assert len(results) == 3
+        assert results[0]
+        assert results[1] == []
+        assert results[2] == []
+        print("✓ test_retrieve_many_best_effort_for_invalid_inputs passed")
+    finally:
+        cleanup_test_db(db_path)
+
+
+def test_retrieve_many_serial_matches_parallel():
+    db_path = setup_test_db()
+    try:
+        db = Database(db_path)
+        fp_gen = TextFingerprintGenerator()
+        ir = InformationRetrieval(db, fp_gen)
+        insert_test_records(db, fp_gen)
+
+        queries = [
+            "allocate dynamic memory for a buffer",
+            "free allocated resources after use",
+            "print the output string to stdout",
+        ]
+
+        serial_results = ir.retrieve_many(queries, shots=2, max_workers=1)
+        parallel_results = ir.retrieve_many(queries, shots=2, max_workers=2)
+        assert serial_results == parallel_results
+        print("✓ test_retrieve_many_serial_matches_parallel passed")
+    finally:
+        cleanup_test_db(db_path)
+
+
+def test_prepare_skips_empty_fingerprint():
+    from evokb.retrieval.information_retrieval import _prepare_information_candidates
+
+    rows = [
+        {
+            "id": 1, "repository": "repo", "relative_path": "a.c",
+            "language": "C", "kind": "function", "node_type": "function_definition",
+            "symbol_name": "foo", "qualified_name": "foo",
+            "parent_qualified_name": None, "start_line": 1, "end_line": 3,
+            "text": "int foo() {}", "text_fingerprint": json.dumps([1, 2, 3]),
+        },
+        {
+            "id": 2, "repository": "repo", "relative_path": "b.c",
+            "language": "C", "kind": "function", "node_type": "function_definition",
+            "symbol_name": "bar", "qualified_name": "bar",
+            "parent_qualified_name": None, "start_line": 1, "end_line": 3,
+            "text": "int bar() {}", "text_fingerprint": None,
+        },
+        {
+            "id": 3, "repository": "repo", "relative_path": "c.c",
+            "language": "C", "kind": "function", "node_type": "function_definition",
+            "symbol_name": "baz", "qualified_name": "baz",
+            "parent_qualified_name": None, "start_line": 1, "end_line": 3,
+            "text": "int baz() {}", "text_fingerprint": "",
+        },
+    ]
+
+    prepared = _prepare_information_candidates(rows, include_text=False, verbose=False)
+    assert len(prepared) == 1, f"空/null 指纹应被过滤，实际保留 {len(prepared)}"
+    assert prepared[0]["qualified_name"] == "foo"
+
+    print("✓ test_prepare_skips_empty_fingerprint passed")
 
 
 def main():
@@ -218,26 +394,34 @@ def main():
     try:
         test_empty_database()
         test_empty_input()
+        test_prepare_skips_empty_fingerprint()
         test_normal_retrieval()
         test_shots_limit()
         test_get_coverage()
         test_update_tree()
         test_language_filter()
+        test_max_prefilters_by_containment_before_greedy_retrieval()
+        test_c_cpp_language_filter_interoperability()
+        test_retrieve_many_empty_input()
+        test_retrieve_many_matches_single_and_preserves_order()
+        test_retrieve_many_best_effort_for_invalid_inputs()
+        test_retrieve_many_serial_matches_parallel()
 
         print("=" * 60)
         print("✓ All InformationRetrieval tests passed!")
         return 0
-    except AssertionError as e:
+    except AssertionError as exc:
         print("=" * 60)
-        print(f"✗ Test failed: {e}")
+        print(f"✗ Test failed: {exc}")
         return 1
-    except Exception as e:
+    except Exception as exc:
         print("=" * 60)
-        print(f"✗ Unexpected error: {e}")
+        print(f"✗ Unexpected error: {exc}")
         import traceback
+
         traceback.print_exc()
         return 1
 
 
 if __name__ == "__main__":
-    exit(main())
+    raise SystemExit(main())

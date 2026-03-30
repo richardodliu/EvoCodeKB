@@ -1,158 +1,297 @@
 import json
-from typing import List, Dict, Optional
+import warnings
+from concurrent.futures import ProcessPoolExecutor
+from typing import Dict, List, Optional, Sequence, Tuple
+
+from ..fingerprint.tree_generator import FingerprintTreeGenerator
 from ..storage.database import Database
+from ._common import (
+    KIND_PRIORITY,
+    _kind_priority,
+    _line_span,
+    containment_prefilter_sort_key,
+    get_containment,
+    get_coverage_from_sets,
+    is_better_candidate,
+    resolve_candidate_languages,
+    resolve_max_candidates,
+    resolve_worker_count,
+    results_from_selected_candidates,
+    update_refer_set,
+)
+
+
+_KNOWLEDGE_BATCH_CANDIDATES = []
+_KNOWLEDGE_BATCH_FP_GENERATOR = None
+
+
+def _prepare_knowledge_candidates(
+    rows: Sequence[Dict], include_text: bool, verbose: bool
+) -> List[Dict]:
+    prepared = []
+    for row in rows:
+        raw_fingerprint = row.get("structure_fingerprint")
+        if not raw_fingerprint:
+            continue
+        try:
+            fp_tree = json.loads(raw_fingerprint)
+        except Exception as exc:
+            if verbose:
+                print(f"警告: 解析指纹树失败 {row['relative_path']}: {exc}")
+            continue
+
+        candidate = {
+            "id": row["id"],
+            "repository": row["repository"],
+            "relative_path": row["relative_path"],
+            "language": row["language"],
+            "kind": row["kind"],
+            "node_type": row["node_type"],
+            "symbol_name": row["symbol_name"],
+            "qualified_name": row["qualified_name"],
+            "parent_qualified_name": row["parent_qualified_name"],
+            "start_line": row["start_line"],
+            "end_line": row["end_line"],
+            "fingerprint_set": frozenset(fp_tree),
+        }
+        if include_text:
+            candidate["text"] = row["text"]
+        prepared.append(candidate)
+    return prepared
+
+
+def _select_knowledge_candidates(
+    input_code: str,
+    language: str,
+    shots: int,
+    limit: int,
+    max_candidates: int,
+    candidates: Sequence[Dict],
+    fp_generator: FingerprintTreeGenerator,
+) -> Optional[Tuple[List[Tuple[Dict, float]], frozenset]]:
+    """返回 (selected_candidates, query_fingerprint_set) 或 None。"""
+    origin_refer_tree = fp_generator.generate_fp_tree(input_code, language)
+    if not origin_refer_tree:
+        return None
+
+    cur_refer_set = set(origin_refer_tree)
+    query_structure_fingerprint_set = frozenset(origin_refer_tree)
+    selected: List[Tuple[Dict, float]] = []
+
+    remaining_candidates = list(candidates)
+    prefilter_count = resolve_max_candidates(limit, max_candidates)
+    if prefilter_count > 0 and len(remaining_candidates) > prefilter_count:
+        scored = []
+        for candidate in remaining_candidates:
+            cont = get_containment(
+                candidate["fingerprint_set"],
+                query_structure_fingerprint_set,
+            )
+            scored.append((candidate, cont))
+        scored.sort(key=lambda item: containment_prefilter_sort_key(item[0], item[1]))
+        remaining_candidates = [candidate for candidate, _ in scored[:prefilter_count]]
+
+    selected_ids = set()
+    for _ in range(min(shots, len(remaining_candidates))):
+        if not cur_refer_set:
+            break
+
+        best_score = 0.0
+        best_candidate = None
+
+        for candidate in remaining_candidates:
+            if candidate["id"] in selected_ids:
+                continue
+            score = get_coverage_from_sets(candidate["fingerprint_set"], cur_refer_set)
+            if score > best_score or (
+                score == best_score and is_better_candidate(candidate, best_candidate)
+            ):
+                best_score = score
+                best_candidate = candidate
+
+        if best_candidate is None or best_score <= 0.0:
+            break
+
+        selected_ids.add(best_candidate["id"])
+        selected.append((best_candidate, best_score))
+        cur_refer_set = update_refer_set(best_candidate["fingerprint_set"], cur_refer_set)
+
+    # 覆盖度用完后，按 containment 降序补齐剩余 shots
+    remaining_shots = shots - len(selected)
+    if remaining_shots > 0:
+        backfill_candidates = [c for c in remaining_candidates if c["id"] not in selected_ids]
+        containment_ranked = sorted(
+            backfill_candidates,
+            key=lambda c: containment_prefilter_sort_key(
+                c,
+                get_containment(c["fingerprint_set"], query_structure_fingerprint_set),
+            ),
+        )
+        for candidate in containment_ranked[:remaining_shots]:
+            selected.append((candidate, 0.0))
+
+    return selected, query_structure_fingerprint_set
+
+
+def _init_knowledge_worker(candidates: Sequence[Dict]):
+    global _KNOWLEDGE_BATCH_CANDIDATES, _KNOWLEDGE_BATCH_FP_GENERATOR
+    _KNOWLEDGE_BATCH_CANDIDATES = list(candidates)
+    _KNOWLEDGE_BATCH_FP_GENERATOR = FingerprintTreeGenerator()
+
+
+def _run_knowledge_worker(task: Tuple[str, str, int, int, int]) -> List[Dict]:
+    input_code, language, shots, limit, max_candidates = task
+    try:
+        result = _select_knowledge_candidates(
+            input_code,
+            language,
+            shots,
+            limit,
+            max_candidates,
+            _KNOWLEDGE_BATCH_CANDIDATES,
+            _KNOWLEDGE_BATCH_FP_GENERATOR,
+        )
+        if result is None:
+            return []
+        selected_candidates, query_fp_set = result
+        return results_from_selected_candidates(selected_candidates, query_fp_set)
+    except Exception as exc:
+        warnings.warn(f"Knowledge retrieval worker 异常: {type(exc).__name__}: {exc}")
+        return []
 
 
 class KnowledgeRetrieval:
     """基于覆盖度的知识检索"""
 
+    KIND_PRIORITY = KIND_PRIORITY
+
     def __init__(self, database: Database, fp_generator):
         self.database = database
-        self.code_fp_generator = fp_generator
+        self.structure_fp_generator = fp_generator
+        self._candidate_cache = {}
 
-    def retrieve(self,
-                 input_code: str,
-                 language: str,
-                 shots: int,
-                 repository: Optional[str] = None,
-                 limit: int = -1) -> List[Dict]:
-        """
-        从数据库中检索与输入代码最相关的 top-k 个代码
+    def retrieve(
+        self,
+        input_code: str,
+        language: str,
+        shots: int,
+        repository: Optional[str] = None,
+        limit: int = -1,
+        max_candidates: int = -1,
+    ) -> List[Dict]:
+        prepared_candidates = self._load_prepared_candidates(
+            language=language,
+            repository=repository,
+            include_text=True,
+            verbose=True,
+        )
+        if not prepared_candidates:
+            print("警告: 数据库中没有匹配的候选条目")
+            return []
 
-        Args:
-            input_code: 输入代码
-            language: 语言类型
-            shots: 返回的代码数量
-            repository: 可选，限定仓库
-            limit: 预过滤候选数量，-1 表示不过滤，正整数表示先按覆盖度取前 N 个再贪心
-
-        Returns:
-            List[Dict]: 检索到的代码记录列表
-        """
-        # 1. 生成输入代码的指纹树
-        origin_cur_refer_trees = self.code_fp_generator.generate_fp_tree(input_code, language)
-        if not origin_cur_refer_trees:
+        result = _select_knowledge_candidates(
+            input_code,
+            language,
+            shots,
+            limit,
+            max_candidates,
+            prepared_candidates,
+            self.structure_fp_generator,
+        )
+        if result is None:
             print("警告: 无法生成输入代码的指纹树")
             return []
 
-        cur_refer_trees = origin_cur_refer_trees.copy()
+        selected_candidates, query_fp_set = result
+        return results_from_selected_candidates(selected_candidates, query_fp_set)
 
-        # 2. 从数据库获取候选代码的轻量指纹信息
-        db_candidates = self.database.query_fingerprints(language=language, repository=repository)
-
-        if not db_candidates:
-            print("警告: 数据库中没有匹配的候选代码")
+    def retrieve_many(
+        self,
+        input_codes: List[str],
+        language: str,
+        shots: int,
+        repository: Optional[str] = None,
+        limit: int = -1,
+        max_candidates: int = -1,
+        max_workers: Optional[int] = None,
+    ) -> List[List[Dict]]:
+        if not input_codes:
             return []
 
-        # 3. 解析候选代码的指纹树
-        candidate_trees = {}
-        valid_candidates = []
+        prepared_candidates = self._load_prepared_candidates(
+            language=language,
+            repository=repository,
+            include_text=True,
+            verbose=False,
+        )
+        if not prepared_candidates:
+            return [[] for _ in input_codes]
 
-        for cand in db_candidates:
-            if cand['code_fingerprint']:
-                try:
-                    fp_tree = json.loads(cand['code_fingerprint'])
-                    candidate_trees[cand['id']] = fp_tree
-                    valid_candidates.append(cand)
-                except Exception as e:
-                    print(f"警告: 解析指纹树失败 {cand['relative_path']}: {e}")
+        worker_count = resolve_worker_count(len(input_codes), max_workers)
+        if worker_count <= 1:
+            results = []
+            for input_code in input_codes:
+                result = _select_knowledge_candidates(
+                    input_code,
+                    language,
+                    shots,
+                    limit,
+                    max_candidates,
+                    prepared_candidates,
+                    self.structure_fp_generator,
+                )
+                if result is None:
+                    results.append([])
+                else:
+                    selected, query_fp_set = result
+                    results.append(
+                        results_from_selected_candidates(selected, query_fp_set)
+                    )
+            return results
 
-        if not valid_candidates:
-            print("警告: 没有有效的候选代码（缺少指纹树）")
-            return []
+        tasks = [
+            (input_code, language, shots, limit, max_candidates)
+            for input_code in input_codes
+        ]
+        with ProcessPoolExecutor(
+            max_workers=worker_count,
+            initializer=_init_knowledge_worker,
+            initargs=(prepared_candidates,),
+        ) as executor:
+            return list(executor.map(_run_knowledge_worker, tasks))
 
-        # 3.5 预过滤：按初始覆盖度筛选 top-N 候选
-        if limit > 0 and len(valid_candidates) > limit:
-            refer_set = set(cur_refer_trees)
-            scored = []
-            for cand in valid_candidates:
-                cand_set = set(candidate_trees[cand['id']])
-                score = len(cand_set & refer_set) / len(cur_refer_trees)
-                scored.append((cand, score))
-            scored.sort(key=lambda x: x[1], reverse=True)
-            valid_candidates = [c for c, s in scored[:limit]]
-
-        # 4. 贪心选择 top-k 代码
-        top_ids = []
-        top_scores = {}
-        remaining_candidates = valid_candidates.copy()
-
-        for _ in range(min(shots, len(remaining_candidates))):
-            best_score = -1.0
-            best_cand = None
-
-            # 遍历所有剩余候选代码
-            for cand in remaining_candidates:
-                cand_tree = candidate_trees[cand['id']]
-                score = self._get_coverage(cand_tree, cur_refer_trees)
-
-                if score > best_score:
-                    best_score = score
-                    best_cand = cand
-
-            if best_cand is None:
-                break
-
-            top_ids.append(best_cand['id'])
-            top_scores[best_cand['id']] = best_score
-
-            # 更新剩余树
-            best_tree = candidate_trees[best_cand['id']]
-            cur_refer_trees = self._update_tree(best_tree, cur_refer_trees)
-
-            # 移除已选代码
-            remaining_candidates.remove(best_cand)
-
-        # 5. 按 id 获取完整记录
-        full_records = self.database.query_by_ids(top_ids)
-        record_map = {r.id: r for r in full_records}
-
-        top_records = []
-        for rid in top_ids:
-            record = record_map.get(rid)
-            if record:
-                top_records.append({
-                    'id': record.id,
-                    'repository': record.repository,
-                    'relative_path': record.relative_path,
-                    'language': record.language,
-                    'text': record.text,
-                    'code': record.code,
-                    'comment': record.comment,
-                    'score': top_scores[rid]
-                })
-
-        return top_records
+    def _load_prepared_candidates(
+        self,
+        language: str,
+        repository: Optional[str],
+        include_text: bool,
+        verbose: bool,
+    ) -> List[Dict]:
+        cache_key = (resolve_candidate_languages(language), repository, include_text)
+        cached = self._candidate_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        rows = self.database.query_retrieval_candidates(
+            language=cache_key[0],
+            repository=repository,
+            include_text=include_text,
+        )
+        prepared_candidates = _prepare_knowledge_candidates(
+            rows, include_text=include_text, verbose=verbose
+        )
+        if verbose and rows and not prepared_candidates:
+            print("警告: 没有有效的候选条目（缺少结构指纹）")
+        self._candidate_cache[cache_key] = prepared_candidates
+        return prepared_candidates
 
     def _get_coverage(self, cand_tree: List[int], refer_tree: List[int]) -> float:
-        """
-        计算候选树对参考树的覆盖度
+        return get_coverage_from_sets(set(cand_tree), set(refer_tree))
 
-        Args:
-            cand_tree: 候选代码的指纹树
-            refer_tree: 参考代码的指纹树
+    def _is_better_candidate(self, candidate: Dict, incumbent: Optional[Dict]) -> bool:
+        return is_better_candidate(candidate, incumbent)
 
-        Returns:
-            float: 覆盖度 [0, 1]
-        """
-        if not refer_tree:
-            return 0.0
-
-        cand_set = set(cand_tree)
-        refer_set = set(refer_tree)
-
-        intersection = cand_set & refer_set
-        return len(intersection) / len(refer_set)
+    def _line_span(self, candidate: Dict) -> int:
+        return _line_span(candidate)
 
     def _update_tree(self, cand_tree: List[int], refer_tree: List[int]) -> List[int]:
-        """
-        更新参考树，移除已覆盖的节点
-
-        Args:
-            cand_tree: 候选代码的指纹树
-            refer_tree: 当前参考树
-
-        Returns:
-            List[int]: 更新后的参考树
-        """
-        return list(set(refer_tree) - set(cand_tree))
+        return sorted(update_refer_set(set(cand_tree), set(refer_tree)))
